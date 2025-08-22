@@ -69,6 +69,7 @@ Contracted axes (einsum):
 
 - multi_root_two_einsums_with_reshape_and_transpose
 <img width="2192" height="1019" alt="output" src="https://github.com/user-attachments/assets/ab1089d1-975c-46f4-9610-db40f2bb3ee4" />
+
 ```
 Operator { id: 0, kind: Split { axis: 0, parts: [3, 4] }, inputs: [0], outputs: [3] }
 Operator { id: 1, kind: Permute { perm: [0, 1] }, inputs: [1], outputs: [4] }
