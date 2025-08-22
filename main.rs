@@ -233,6 +233,7 @@ pub enum OpKind {
     // multi-input, single output
     Concat { axis: usize }, // interior: concat along axis (inputs must match other axes)
     Einsum { spec: String }, // interior: "ab,bc->ac" (N inputs)
+    ReshapeTo { out_shape: Vec<u64> },
 }
 
 #[derive(Clone, Debug)]
@@ -351,6 +352,17 @@ fn normalize_view(st: &mut State, v: &View) -> View {
     }
 }
 
+// === 추가: 유틸 gcd ===
+#[inline]
+fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a
+}
+
 /* ---------- Primitive interior transforms ---------- */
 
 fn apply_split(st: &mut State, vin: &View, axis: usize, parts: &[u64]) -> View {
@@ -427,6 +439,109 @@ fn apply_concat_with_unify(st: &mut State, vins: &mut [View], axis: usize) -> (V
     let mut decomp = vins[0].decomp.clone();
     decomp[axis] = st.new_concat_axis(shape[axis]);
     (View { shape, decomp }, changed)
+}
+
+// === 2) 구현: 평탄화 factor 흐름을 따라 목표 축을 구성하는 reshape ===
+fn apply_reshape_to_shape(st: &mut State, vin: &View, out_shape: &[u64]) -> View {
+    use std::collections::VecDeque;
+
+    // 입력 정규화(leaf reps)
+    let v = normalize_view(st, vin);
+
+    // 총 원소 수 일치 확인
+    let prod_in: u64 = v.shape.iter().product();
+    let prod_out: u64 = out_shape.iter().product();
+    assert_eq!(
+        prod_in, prod_out,
+        "ReshapeTo: total element count mismatch (in={} out={})",
+        prod_in, prod_out
+    );
+
+    // 입력 factor 흐름(좌→우) 구성
+    let mut flow: VecDeque<FactorId> = VecDeque::new();
+    for AxisDecomp(fs) in &v.decomp {
+        for &f in fs {
+            flow.push_back(f);
+        }
+    }
+
+    // out_shape 각 축을 왼쪽부터 만들기
+    let mut out_decomp: Vec<AxisDecomp> = Vec::with_capacity(out_shape.len());
+    for &target in out_shape {
+        assert!(target > 0, "ReshapeTo: zero-length axis not allowed");
+        let mut need = target;
+        let mut axis_factors: Vec<FactorId> = vec![];
+
+        // need를 1이 될 때까지 흐름 앞에서부터 factor를 소비(필요 시 분해)
+        while need > 1 {
+            let f = flow
+                .pop_front()
+                .expect("ReshapeTo: insufficient factors in flow");
+            let fr = st.uf_find(f); // leaf rep
+            let s = st.factors[&fr].size;
+
+            if s == need {
+                // 딱 맞으면 이 factor를 쓰고 종료
+                axis_factors.push(fr);
+                need = 1;
+                break;
+            } else if s < need {
+                if need % s == 0 {
+                    // 통째로 가져갈 수 있음
+                    axis_factors.push(fr);
+                    need /= s;
+                } else {
+                    // 일부만 필요 → 최대공약수만큼 잘라서 가져오고 나머지는 되돌림
+                    let g = gcd_u64(s, need);
+                    assert!(
+                        g > 1,
+                        "ReshapeTo: cannot align boundary (factor {} vs need {})",
+                        s,
+                        need
+                    );
+                    let kids = st.split_factor(fr, &[g, s / g]);
+                    axis_factors.push(kids[0]); // g 부분 사용
+                    need /= g; // 남은 필요량
+                    flow.push_front(kids[1]); // 나머지 반환
+                }
+            } else {
+                // s > need
+                if s % need == 0 {
+                    // 딱 need 만큼 잘라 쓰고 나머지는 되돌림
+                    let kids = st.split_factor(fr, &[need, s / need]);
+                    axis_factors.push(kids[0]);
+                    need = 1;
+                    flow.push_front(kids[1]);
+                } else {
+                    let g = gcd_u64(s, need);
+                    assert!(
+                        g > 1,
+                        "ReshapeTo: cannot align boundary (factor {} vs need {})",
+                        s,
+                        need
+                    );
+                    let kids = st.split_factor(fr, &[g, s / g]);
+                    axis_factors.push(kids[0]); // g만 우선 사용
+                    need /= g;
+                    flow.push_front(kids[1]); // 나머지 반환
+                }
+            }
+        }
+
+        // need==1이면 현재 축 완성
+        out_decomp.push(AxisDecomp(axis_factors));
+    }
+
+    // 모든 요소를 소진했는지(잔여 factor가 있으면 마지막 out_shape에 1이 섞여 있었을 가능성)
+    assert!(
+        flow.is_empty(),
+        "ReshapeTo: leftover factors remain after building out_shape"
+    );
+
+    View {
+        shape: out_shape.to_vec(),
+        decomp: out_decomp,
+    }
 }
 
 /* =========================
@@ -851,6 +966,25 @@ pub fn relabel_graph(st: &mut State, g: &Graph) -> HashMap<OpId, OpRelabel> {
                     }
                 }
             }
+            OpKind::ReshapeTo { out_shape } => {
+                assert_eq!(op.inputs.len(), 1);
+                let vin = view_from_tensor(st, op.inputs[0]);
+                let vout = apply_reshape_to_shape(st, &vin, out_shape);
+                let mut t = Tensor {
+                    id: op.outputs[0],
+                    shape: vout.shape.clone(),
+                    decomp: vout.decomp.clone(),
+                };
+                st.normalize_tensor(&mut t);
+                let out_changed = update_tensor_if_changed(st, t);
+                if out_changed {
+                    for c in g.consumers_of(op.outputs[0]) {
+                        if inq.insert(c) {
+                            q.push_back(c);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -964,6 +1098,7 @@ pub fn format_reports_pretty(st: &State, g: &Graph, reports: &HashMap<OpId, OpRe
             OpKind::Permute { perm } => format!("Permute(perm={:?})", perm),
             OpKind::Concat { axis } => format!("Concat(axis={})", axis),
             OpKind::Einsum { spec } => format!("Einsum(\"{}\")", spec),
+            OpKind::ReshapeTo { out_shape } => format!("ReshapeTo({:?})", out_shape),
         }
     }
 
@@ -1514,6 +1649,44 @@ mod tests {
             .collect();
         contracted.sort_unstable();
         assert_eq!(contracted, vec![(0, 0), (0, 1), (1, 0), (1, 1)]);
+
+        println!("{}", format_reports_pretty(&st, &g, &reports));
+    }
+
+    #[test]
+    fn reshape_to_composite_split_merge() {
+        let mut st = State::new();
+        let a = st.add_source_tensor(vec![12, 6]); // [12,6]
+        let mut g = Graph::new();
+
+        let t_out = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![4, 6, 3],
+            },
+            vec![a],
+            vec![t_out],
+        );
+
+        let reports = relabel_graph(&mut st, &g);
+        assert_eq!(st.tensors[&t_out].shape, vec![4, 6, 3]);
+
+        // factor 곱 검증
+        let AxisDecomp(ax0) = &st.tensors[&t_out].decomp[0];
+        let AxisDecomp(ax1) = &st.tensors[&t_out].decomp[1];
+        let AxisDecomp(ax2) = &st.tensors[&t_out].decomp[2];
+        let prod = |fs: &Vec<FactorId>| fs.iter().map(|f| st.factors[f].size).product::<u64>();
+        assert_eq!(prod(ax0), 4);
+        assert_eq!(prod(ax1), 6);
+        assert_eq!(prod(ax2), 3);
+
+        // 리포트가 잘 나오나(라벨 존재)
+        let rep = &reports[&0];
+        assert_eq!(rep.output_axis_labels.len(), 3);
+        // axis0은 최소 하나의 라벨
+        assert!(!rep.output_axis_labels[0].is_empty());
+        assert!(!rep.output_axis_labels[1].is_empty());
+        assert!(!rep.output_axis_labels[2].is_empty());
 
         println!("{}", format_reports_pretty(&st, &g, &reports));
     }
