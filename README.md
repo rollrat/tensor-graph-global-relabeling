@@ -687,3 +687,90 @@ Contracted axes (einsum):
   - in#1 axis1 (len=3): [L3]
   - in#1 axis2 (len=2): [L5]
 ```
+
+- four_consecutive_complex_reshapes_same_io_shape
+
+<img width="1423" height="123" alt="image" src="https://github.com/user-attachments/assets/a44c8f7d-3161-45e6-915e-42e05cde12ec" />
+
+```
+Operator { id: 0, kind: ReshapeTo { out_shape: [3, 12, 5] }, inputs: [0], outputs: [1] }
+Operator { id: 1, kind: ReshapeTo { out_shape: [6, 6, 5] }, inputs: [1], outputs: [2] }
+Operator { id: 2, kind: ReshapeTo { out_shape: [2, 9, 10] }, inputs: [2], outputs: [3] }
+Operator { id: 3, kind: ReshapeTo { out_shape: [6, 6, 5] }, inputs: [3], outputs: [4] }
+
+=== op0: ReshapeTo([3, 12, 5]) ===
+Inputs:
+  - in#0  t0  shape=[6, 6, 5]
+Outputs:
+  - out#0 t1  shape=[3, 12, 5]
+Labels (operator-local):
+  - L0 = r3=3
+  - L1 = r4=2
+  - L2 = r1=6
+  - L3 = r2=5
+Input axes:
+  - in#0 axis0 (len=6): [L0, L1]
+  - in#0 axis1 (len=6): [L2]
+  - in#0 axis2 (len=5): [L3]
+Output axes:
+  - axis0 (len=3): [L0]
+  - axis1 (len=12): [L1, L2]
+  - axis2 (len=5): [L3]
+
+=== op1: ReshapeTo([6, 6, 5]) ===
+Inputs:
+  - in#0  t1  shape=[3, 12, 5]
+Outputs:
+  - out#0 t2  shape=[6, 6, 5]
+Labels (operator-local):
+  - L0 = r3=3
+  - L1 = r4=2
+  - L2 = r1=6
+  - L3 = r2=5
+Input axes:
+  - in#0 axis0 (len=3): [L0]
+  - in#0 axis1 (len=12): [L1, L2]
+  - in#0 axis2 (len=5): [L3]
+Output axes:
+  - axis0 (len=6): [L0, L1]
+  - axis1 (len=6): [L2]
+  - axis2 (len=5): [L3]
+
+=== op2: ReshapeTo([2, 9, 10]) ===
+Inputs:
+  - in#0  t2  shape=[6, 6, 5]
+Outputs:
+  - out#0 t3  shape=[2, 9, 10]
+Labels (operator-local):
+  - L0 = r6=2
+  - L1 = r8=9
+  - L2 = r9=10
+Input axes:
+  - in#0 axis0 (len=6): [L0, L1]
+  - in#0 axis1 (len=6): [L1, L2]
+  - in#0 axis2 (len=5): [L2]
+Output axes:
+  - axis0 (len=2): [L0]
+  - axis1 (len=9): [L1]
+  - axis2 (len=10): [L2]
+
+=== op3: ReshapeTo([6, 6, 5]) ===
+Inputs:
+  - in#0  t3  shape=[2, 9, 10]
+Outputs:
+  - out#0 t4  shape=[6, 6, 5]
+Labels (operator-local):
+  - L0 = r6=2
+  - L1 = r10=3
+  - L2 = r11=3
+  - L3 = r12=2
+  - L4 = r13=5
+Input axes:
+  - in#0 axis0 (len=2): [L0]
+  - in#0 axis1 (len=9): [L1, L2]
+  - in#0 axis2 (len=10): [L3, L4]
+Output axes:
+  - axis0 (len=6): [L0, L1]
+  - axis1 (len=6): [L2, L3]
+  - axis2 (len=5): [L4]
+```
