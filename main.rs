@@ -549,12 +549,41 @@ fn apply_reshape_to_shape(st: &mut State, vin: &View, out_shape: &[u64]) -> View
  * ========================= */
 
 fn parse_einsum_spec(spec: &str) -> (Vec<Vec<char>>, Vec<char>) {
-    // "ab,bc->ac"
-    let (lhs, rhs) = spec
+    // 1) 모든 공백 제거 (space, tab, newline 등)
+    let cleaned: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+
+    // 2) "lhs->rhs" 분리
+    let (lhs, rhs) = cleaned
         .split_once("->")
         .expect("einsum spec must contain '->'");
-    let in_labels: Vec<Vec<char>> = lhs.split(',').map(|s| s.chars().collect()).collect();
-    let out_labels: Vec<char> = rhs.chars().collect();
+
+    // 3) lhs: 콤마로 나눈 각 입력의 라벨 벡터
+    let mut in_labels: Vec<Vec<char>> = Vec::new();
+    for term in lhs.split(',') {
+        assert!(!term.is_empty(), "einsum: empty input term");
+        // 라벨로 쓸 수 있는 문자는 [A-Za-z]만 허용 (원하면 숫자/밑줄 추가)
+        let labs: Vec<char> = term
+            .chars()
+            .map(|c| {
+                assert!(c.is_ascii_alphabetic(), "einsum: invalid label '{c}'");
+                c
+            })
+            .collect();
+        in_labels.push(labs);
+    }
+
+    // 4) rhs: 출력 라벨
+    let out_labels: Vec<char> = rhs
+        .chars()
+        .map(|c| {
+            assert!(
+                c.is_ascii_alphabetic(),
+                "einsum: invalid output label '{c}'"
+            );
+            c
+        })
+        .collect();
+
     (in_labels, out_labels)
 }
 
@@ -1687,6 +1716,139 @@ mod tests {
         assert!(!rep.output_axis_labels[0].is_empty());
         assert!(!rep.output_axis_labels[1].is_empty());
         assert!(!rep.output_axis_labels[2].is_empty());
+
+        println!("{}", format_reports_pretty(&st, &g, &reports));
+    }
+
+    /// Reshape(여러 번) + Einsum(2개) 예시
+    ///
+    /// A: [12, 6]  --ReshapeTo->[4, 6, 3] ----------------------\
+    ///                                                     Einsum1 "acb, cde -> abde"  -> T3 [4,3,2,8]
+    /// B: [6, 16]  --ReshapeTo->[6, 2, 8] ----------------------/
+    ///
+    /// T3: [4,3,2,8] --ReshapeTo->[12,2,8] --ReshapeTo->[3,4,2,8] ----\
+    ///                                                              Einsum2 "fgde, eh -> fgdh" -> Tout [3,4,2,5]
+    /// C:  [8, 5]  ---------------------------------------------------/
+    ///
+    /// 라벨 대응:
+    ///  - Einsum1:  a=4, b=3, c=6, d=2, e=8  →  out "abde" = [4,3,2,8]
+    ///  - Einsum2:  f=3, g=4, d=2, e=8  ×  e=8,h=5  →  out "fgdh" = [3,4,2,5]
+    #[test]
+    fn reshape_and_two_einsums_example() {
+        let mut st = State::new();
+
+        // Sources
+        let a = st.add_source_tensor(vec![12, 6]); // A
+        let b = st.add_source_tensor(vec![6, 16]); // B
+        let c = st.add_source_tensor(vec![8, 5]); // C
+
+        let mut g = Graph::new();
+
+        // ---- Reshape before Einsum1 ----
+        // A: [12,6] -> [4,6,3]
+        let a1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![4, 6, 3],
+            },
+            vec![a],
+            vec![a1],
+        );
+
+        // B: [6,16] -> [6,2,8]
+        let b1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![6, 2, 8],
+            },
+            vec![b],
+            vec![b1],
+        );
+
+        // ---- Einsum1: "acb, cde -> abde" ----
+        // [4,6,3]  ×  [6,2,8]  →  [4,3,2,8]
+        let t3 = st.alloc_tensor_id();
+        let op_e1 = g.add_operator(
+            OpKind::Einsum {
+                spec: "acb, cde -> abde".into(),
+            },
+            vec![a1, b1],
+            vec![t3],
+        );
+
+        // ---- Permute T3 ----
+        // T3: [4,3,2,8] -> Permute([1,0,2,3]) -> [3,4,2,8]
+        let t3_r2 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::Permute {
+                perm: vec![1, 0, 2, 3],
+            }, // [4,3,2,8] -> [3,4,2,8]
+            vec![t3],
+            vec![t3_r2],
+        );
+
+        // ---- Einsum2: "fgde, eh -> fgdh" ----
+        // [3,4,2,8]  ×  [8,5]  →  [3,4,2,5]
+        let tout = st.alloc_tensor_id();
+        let op_e2 = g.add_operator(
+            OpKind::Einsum {
+                spec: "fgde, eh -> fgdh".into(),
+            },
+            vec![t3_r2, c],
+            vec![tout],
+        );
+
+        // Run fixpoint relabeling
+        let reports = relabel_graph(&mut st, &g);
+
+        // ---- Shape checks ----
+        assert_eq!(st.tensors[&a1].shape, vec![4, 6, 3], "A reshape mismatch");
+        assert_eq!(st.tensors[&b1].shape, vec![6, 2, 8], "B reshape mismatch");
+        assert_eq!(
+            st.tensors[&t3].shape,
+            vec![4, 3, 2, 8],
+            "Einsum1 output mismatch"
+        );
+        assert_eq!(
+            st.tensors[&t3_r2].shape,
+            vec![3, 4, 2, 8],
+            "Permute T3→[3,4,2,8] mismatch"
+        );
+        assert_eq!(
+            st.tensors[&tout].shape,
+            vec![3, 4, 2, 5],
+            "Einsum2 output mismatch"
+        );
+
+        // ---- Unification checks ----
+        // Einsum1: 'c'(=6) unify between a1 axis1 and b1 axis0
+        let c_left = st.tensors[&a1].decomp[1].0[0];
+        let c_right = st.tensors[&b1].decomp[0].0[0];
+        assert_eq!(
+            st.uf_find(c_left),
+            st.uf_find(c_right),
+            "E1: 'c' must unify"
+        );
+
+        // Einsum2: 'e'(=8) unify between t3_r2 axis3 and c axis0
+        let e_left = st.tensors[&t3_r2].decomp[3].0[0];
+        let e_right = st.tensors[&c].decomp[0].0[0];
+        assert_eq!(
+            st.uf_find(e_left),
+            st.uf_find(e_right),
+            "E2: 'e' must unify"
+        );
+
+        // ---- Reports sanity ----
+        // E1 has 4 output axes and some contracted info
+        let r1 = &reports[&op_e1];
+        assert_eq!(r1.output_axis_labels.len(), 4);
+        assert!(!r1.contracted_axis_labels.is_empty());
+
+        // E2 has 4→2 mapping: output [3,4,2,5] with contracted 'e'
+        let r2 = &reports[&op_e2];
+        assert_eq!(r2.output_axis_labels.len(), 4);
+        assert!(!r2.contracted_axis_labels.is_empty());
 
         println!("{}", format_reports_pretty(&st, &g, &reports));
     }
