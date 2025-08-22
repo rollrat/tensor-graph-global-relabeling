@@ -226,3 +226,129 @@ Contracted axes (einsum):
   - in#1 axis0 (len=5): [L3]
   - in#1 axis1 (len=3): [L4]
 ```
+
+- reshape_and_two_einsums_example
+
+<img width="1475" height="373" alt="re_autolayout" src="https://github.com/user-attachments/assets/971f27ed-e676-4217-8a4d-0e2ca85a94d4" />
+
+```
+Operator { id: 0, kind: ReshapeTo { out_shape: [4, 6, 3] }, inputs: [0], outputs: [3] }
+Operator { id: 1, kind: ReshapeTo { out_shape: [6, 2, 8] }, inputs: [1], outputs: [4] }
+Operator { id: 2, kind: Einsum { spec: "acb, cde -> abde" }, inputs: [3, 4], outputs: [5] }
+Operator { id: 3, kind: Permute { perm: [1, 0, 2, 3] }, inputs: [5], outputs: [6] }
+Operator { id: 4, kind: Einsum { spec: "fgde, eh -> fgdh" }, inputs: [6, 2], outputs: [7] }
+
+=== op1: ReshapeTo([6, 2, 8]) ===
+Inputs:
+  - in#0  t1  shape=[6, 16]
+Outputs:
+  - out#0 t4  shape=[6, 2, 8]
+Labels (operator-local):
+  - L0 = r9=3
+  - L1 = r10=2
+  - L2 = r6=2
+  - L3 = r4=8
+Input axes:
+  - in#0 axis0 (len=6): [L0, L1]
+  - in#0 axis1 (len=16): [L2, L3]
+Output axes:
+  - axis0 (len=6): [L0, L1]
+  - axis1 (len=2): [L2]
+  - axis2 (len=8): [L3]
+
+=== op0: ReshapeTo([4, 6, 3]) ===
+Inputs:
+  - in#0  t0  shape=[12, 6]
+Outputs:
+  - out#0 t3  shape=[4, 6, 3]
+Labels (operator-local):
+  - L0 = r8=4
+  - L1 = r9=3
+  - L2 = r10=2
+  - L3 = r11=3
+Input axes:
+  - in#0 axis0 (len=12): [L0, L1]
+  - in#0 axis1 (len=6): [L2, L3]
+Output axes:
+  - axis0 (len=4): [L0]
+  - axis1 (len=6): [L1, L2]
+  - axis2 (len=3): [L3]
+
+=== op2: Einsum("acb, cde -> abde") ===
+Inputs:
+  - in#0  t3  shape=[4, 6, 3]
+  - in#1  t4  shape=[6, 2, 8]
+Outputs:
+  - out#0 t5  shape=[4, 3, 2, 8]
+Labels (operator-local):
+  - L0 = r8=4
+  - L1 = r11=3
+  - L2 = r6=2
+  - L3 = r4=8
+  - L4 = r9=3
+  - L5 = r10=2
+Input axes:
+  - in#0 axis0 (len=4): [L0]
+  - in#0 axis1 (len=6): [L4, L5]
+  - in#0 axis2 (len=3): [L1]
+  - in#1 axis0 (len=6): [L4, L5]
+  - in#1 axis1 (len=2): [L2]
+  - in#1 axis2 (len=8): [L3]
+Output axes:
+  - axis0 (len=4): [L0]
+  - axis1 (len=3): [L1]
+  - axis2 (len=2): [L2]
+  - axis3 (len=8): [L3]
+Contracted axes (einsum):
+  - in#0 axis1 (len=6): [L4, L5]
+  - in#1 axis0 (len=6): [L4, L5]
+
+=== op3: Permute(perm=[1, 0, 2, 3]) ===
+Inputs:
+  - in#0  t5  shape=[4, 3, 2, 8]
+Outputs:
+  - out#0 t6  shape=[3, 4, 2, 8]
+Labels (operator-local):
+  - L0 = r11=3
+  - L1 = r8=4
+  - L2 = r6=2
+  - L3 = r4=8
+Input axes:
+  - in#0 axis0 (len=4): [L1]
+  - in#0 axis1 (len=3): [L0]
+  - in#0 axis2 (len=2): [L2]
+  - in#0 axis3 (len=8): [L3]
+Output axes:
+  - axis0 (len=3): [L0]
+  - axis1 (len=4): [L1]
+  - axis2 (len=2): [L2]
+  - axis3 (len=8): [L3]
+
+=== op4: Einsum("fgde, eh -> fgdh") ===
+Inputs:
+  - in#0  t6  shape=[3, 4, 2, 8]
+  - in#1  t2  shape=[8, 5]
+Outputs:
+  - out#0 t7  shape=[3, 4, 2, 5]
+Labels (operator-local):
+  - L0 = r11=3
+  - L1 = r8=4
+  - L2 = r6=2
+  - L3 = r5=5
+  - L4 = r4=8
+Input axes:
+  - in#0 axis0 (len=3): [L0]
+  - in#0 axis1 (len=4): [L1]
+  - in#0 axis2 (len=2): [L2]
+  - in#0 axis3 (len=8): [L4]
+  - in#1 axis0 (len=8): [L4]
+  - in#1 axis1 (len=5): [L3]
+Output axes:
+  - axis0 (len=3): [L0]
+  - axis1 (len=4): [L1]
+  - axis2 (len=2): [L2]
+  - axis3 (len=5): [L3]
+Contracted axes (einsum):
+  - in#0 axis3 (len=8): [L4]
+  - in#1 axis0 (len=8): [L4]
+```
