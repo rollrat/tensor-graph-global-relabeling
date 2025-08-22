@@ -1,5 +1,30 @@
 # Tensor Graph Global Relabling
 
+- reshape_to_composite_split_merge
+<img width="1779" height="500" alt="output (2)" src="https://github.com/user-attachments/assets/6c92a2b8-4821-4953-af10-ae5d639f9693" />
+
+```
+op: Operator { id: 0, kind: ReshapeTo { out_shape: [4, 6, 3] }, inputs: [0], outputs: [1] }
+
+=== op0: ReshapeTo([4, 6, 3]) ===
+Inputs:
+  - in#0  t0  shape=[12, 6]
+Outputs:
+  - out#0 t1  shape=[4, 6, 3]
+Labels (operator-local):
+  - L0 = r2=4
+  - L1 = r3=3
+  - L2 = r4=2
+  - L3 = r5=3
+Input axes:
+  - in#0 axis0 (len=12): [L0, L1]
+  - in#0 axis1 (len=6): [L2, L3]
+Output axes:
+  - axis0 (len=4): [L0]
+  - axis1 (len=6): [L1, L2]
+  - axis2 (len=3): [L3]
+```
+
 - multi_root_reshape_einsum
 <img width="1775" height="780" alt="output (1)" src="https://github.com/user-attachments/assets/7a852b3e-f70a-4fa2-ba00-067a2f4a088d" />
 
