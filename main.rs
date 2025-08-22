@@ -1852,4 +1852,261 @@ mod tests {
 
         println!("{}", format_reports_pretty(&st, &g, &reports));
     }
+
+    /// Three-einsum example with required contractions & transposes.
+    ///
+    /// Einsum1 (op2):
+    ///   A_src: [12,10] --ReshapeTo->[3,4,5,2] --Permute([0,1,3,2])-> A1: [3,4,2,5]
+    ///   B_src: [5,14]  --ReshapeTo->[5,2,7]                           B1: [5,2,7]
+    ///   Spec: "abdc,cde->abe"  (contract c=5, d=2) → T_E1: [3,4,7]
+    ///
+    /// Einsum2 (op6):
+    ///   C_src: [12,12] --ReshapeTo->[2,6,3,4] --Permute([1,0,2,3])-> C1: [6,2,3,4]
+    ///   D_src: [15,4]  --ReshapeTo->[3,4,5]    --Permute([1,0,2])--> D1: [4,3,5]
+    ///   Spec: "gfhi,ihj->gfj"  (contract h=3, i=4) → T_E2: [6,2,5]
+    ///
+    /// Einsum3 (op11) takes outputs of Einsum1 & Einsum2:
+    ///   Left  (from T_E1): [3,4,7] --ReshapeTo->[3,2,2,7] --Permute([0,2,1,3])-> L: [3,2,2,7]
+    ///   Right (from T_E2): [6,2,5] --ReshapeTo->[3,2,2,5] --Permute([1,0,2,3])-> R: [2,3,2,5]
+    ///   Spec: "axfy,fazt->xyt"  (contract a=3, f=2) → T_OUT: [2,7,5]
+    ///
+    /// - 각 einsum은 최소 한 쪽 입력에 transpose(permute)가 포함됨
+    /// - 각 einsum의 입력 랭크는 3~7, 입력 간 공유 라벨은 2개
+    #[test]
+    fn three_einsums_with_transposes_and_reshapes() {
+        let mut st = State::new();
+        let mut g = Graph::new();
+
+        // ===== Sources =====
+        let a_src = st.add_source_tensor(vec![12, 10]); // 120 = 3*4*5*2
+        let b_src = st.add_source_tensor(vec![5, 14]); // 70  = 5*2*7
+        let c_src = st.add_source_tensor(vec![12, 12]); // 144 = 2*6*3*4
+        let d_src = st.add_source_tensor(vec![15, 4]); // 60  = 3*4*5
+
+        // ===== Einsum1 preps =====
+        // A: [12,10] -> [3,4,5,2] -> permute [0,1,3,2] -> [3,4,2,5]
+        let a_r = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![3, 4, 5, 2],
+            },
+            vec![a_src],
+            vec![a_r],
+        );
+        let a1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::Permute {
+                perm: vec![0, 1, 3, 2],
+            },
+            vec![a_r],
+            vec![a1],
+        );
+
+        // B: [5,14] -> [5,2,7]
+        let b1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![5, 2, 7],
+            },
+            vec![b_src],
+            vec![b1],
+        );
+
+        // Einsum1: "abdc,cde->abe"  (a=3,b=4,d=2,c=5) x (c=5,d=2,e=7) -> [3,4,7]
+        let t_e1 = st.alloc_tensor_id();
+        let op_e1 = g.add_operator(
+            OpKind::Einsum {
+                spec: "abdc,cde->abe".into(),
+            },
+            vec![a1, b1],
+            vec![t_e1],
+        );
+
+        // ===== Einsum2 preps =====
+        // C: [12,12] -> [2,6,3,4] -> permute [1,0,2,3] -> [6,2,3,4]
+        let c_r = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![2, 6, 3, 4],
+            },
+            vec![c_src],
+            vec![c_r],
+        );
+        let c1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::Permute {
+                perm: vec![1, 0, 2, 3],
+            },
+            vec![c_r],
+            vec![c1],
+        );
+
+        // D: [15,4] -> [3,5,4] -> permute [2,0,1] -> [4,3,5]
+        let d_r = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![3, 5, 4],
+            },
+            vec![d_src],
+            vec![d_r],
+        );
+        let d1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::Permute {
+                perm: vec![2, 0, 1],
+            },
+            vec![d_r],
+            vec![d1],
+        );
+
+        // Einsum2: "gfhi,ihj->gfj"  (contract h=3,i=4) -> [6,2,5]
+        let t_e2 = st.alloc_tensor_id();
+        let op_e2 = g.add_operator(
+            OpKind::Einsum {
+                spec: "gfhi,ihj->gfj".into(),
+            },
+            vec![c1, d1],
+            vec![t_e2],
+        );
+
+        // ===== Einsum3 preps (uses outputs of E1 & E2) =====
+        // Left  from E1: [3,4,7] -> [3,2,2,7] -> permute [0,2,1,3] -> [3,2,2,7]
+        let l_r = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![3, 2, 2, 7],
+            },
+            vec![t_e1],
+            vec![l_r],
+        );
+        let l1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::Permute {
+                perm: vec![0, 2, 1, 3],
+            },
+            vec![l_r],
+            vec![l1],
+        );
+
+        // Right from E2: [6,2,5] -> [3,2,2,5] -> permute [1,0,2,3] -> [2,3,2,5]
+        let r_r = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::ReshapeTo {
+                out_shape: vec![3, 2, 2, 5],
+            },
+            vec![t_e2],
+            vec![r_r],
+        );
+        let r1 = st.alloc_tensor_id();
+        g.add_operator(
+            OpKind::Permute {
+                perm: vec![1, 0, 2, 3],
+            },
+            vec![r_r],
+            vec![r1],
+        );
+
+        // Einsum3: "axfy,fazt->xyt"  (contract a=3, f=2) -> [2,7,5]
+        let t_out = st.alloc_tensor_id();
+        let op_e3 = g.add_operator(
+            OpKind::Einsum {
+                spec: "axfy,fazt->xyt".into(),
+            },
+            vec![l1, r1],
+            vec![t_out],
+        );
+
+        // ===== Run relabeling (fixpoint) =====
+        let reports = relabel_graph(&mut st, &g);
+
+        // ===== Shape checks =====
+        assert_eq!(st.tensors[&a_r].shape, vec![3, 4, 5, 2]);
+        assert_eq!(st.tensors[&a1].shape, vec![3, 4, 2, 5]);
+        assert_eq!(st.tensors[&b1].shape, vec![5, 2, 7]);
+        assert_eq!(st.tensors[&t_e1].shape, vec![3, 4, 7]);
+
+        assert_eq!(st.tensors[&c1].shape, vec![6, 2, 3, 4]);
+        assert_eq!(st.tensors[&d1].shape, vec![4, 3, 5]);
+        assert_eq!(st.tensors[&t_e2].shape, vec![6, 2, 5]);
+
+        assert_eq!(st.tensors[&l1].shape, vec![3, 2, 2, 7]);
+        assert_eq!(st.tensors[&r1].shape, vec![2, 3, 2, 5]);
+        assert_eq!(st.tensors[&t_out].shape, vec![2, 7, 5]);
+
+        // ===== Unification checks (contractions) =====
+        // E1: contract c=5 and d=2 between A1 and B1
+        // A1 "abdc": idx2=d=2, idx3=c=5 ; B1 "cde": idx0=c=5, idx1=d=2
+        let a1_d = st.tensors[&a1].decomp[2].0[0];
+        let a1_c = st.tensors[&a1].decomp[3].0[0];
+        let b1_c = st.tensors[&b1].decomp[0].0[0];
+        let b1_d = st.tensors[&b1].decomp[1].0[0];
+        assert_eq!(
+            st.uf_find(a1_c),
+            st.uf_find(b1_c),
+            "E1: label 'c'(=5) must unify"
+        );
+        assert_eq!(
+            st.uf_find(a1_d),
+            st.uf_find(b1_d),
+            "E1: label 'd'(=2) must unify"
+        );
+
+        // E2: contract h=3 (C1 idx2) and i=4 (C1 idx3) with D1 idx1, idx0 (after perm)
+        let c1_h = st.tensors[&c1].decomp[2].0[0]; // 3
+        let c1_i = st.tensors[&c1].decomp[3].0[0]; // 4
+        let d1_h = st.tensors[&d1].decomp[1].0[0]; // 3
+        let d1_i = st.tensors[&d1].decomp[0].0[0]; // 4
+        assert_eq!(
+            st.uf_find(c1_h),
+            st.uf_find(d1_h),
+            "E2: label 'h'(=3) must unify"
+        );
+        assert_eq!(
+            st.uf_find(c1_i),
+            st.uf_find(d1_i),
+            "E2: label 'i'(=4) must unify"
+        );
+
+        // E3: contract a=3 and f=2 between L1 and R1
+        // L1 "axfy": idx0=a=3, idx2=f=2
+        // R1 "fazt": idx1=a=3, idx0=f=2
+        let l1_a = st.tensors[&l1].decomp[0].0[0];
+        let l1_f = st.tensors[&l1].decomp[2].0[0];
+        let r1_f = st.tensors[&r1].decomp[0].0[0];
+        let r1_a = st.tensors[&r1].decomp[1].0[0];
+        assert_eq!(
+            st.uf_find(l1_a),
+            st.uf_find(r1_a),
+            "E3: label 'a'(=3) must unify"
+        );
+        assert_eq!(
+            st.uf_find(l1_f),
+            st.uf_find(r1_f),
+            "E3: label 'f'(=2) must unify"
+        );
+
+        // ===== Report sanity: each einsum reports contracted axes and outputs =====
+        let r1 = &reports[&op_e1];
+        assert!(
+            !r1.contracted_axis_labels.is_empty(),
+            "E1 contracted axes missing"
+        );
+        assert_eq!(r1.output_axis_labels.len(), 3); // 'abe'
+
+        let r2 = &reports[&op_e2];
+        assert!(
+            !r2.contracted_axis_labels.is_empty(),
+            "E2 contracted axes missing"
+        );
+        assert_eq!(r2.output_axis_labels.len(), 3); // 'gfj'
+
+        let r3 = &reports[&op_e3];
+        assert!(
+            !r3.contracted_axis_labels.is_empty(),
+            "E3 contracted axes missing"
+        );
+        assert_eq!(r3.output_axis_labels.len(), 3); // 'xyt'
+
+        println!("{}", format_reports_pretty(&st, &g, &reports));
+    }
 }
